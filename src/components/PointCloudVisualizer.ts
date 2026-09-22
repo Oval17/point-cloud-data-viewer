@@ -18,6 +18,7 @@ export class PointCloudVisualizer {
   private container: HTMLElement;
   private animationId = 0;
   private disposed = false;
+  private loadSeq = 0;
   private defaultCamPos = new THREE.Vector3(2, 2, 2);
 
   constructor(displayContainer: HTMLElement) {
@@ -46,15 +47,20 @@ export class PointCloudVisualizer {
     this.scene.add(dir);
   }
 
-  private clearClouds() {
-    for (const pts of this.clouds) {
-      this.scene.remove(pts);
+  private disposePoints(list: THREE.Points[]) {
+    for (const pts of list) {
       pts.geometry.dispose();
       const mat = pts.material as THREE.Material | THREE.Material[];
       if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
       else mat.dispose();
     }
+  }
+
+  private clearClouds() {
+    const old = this.clouds;
     this.clouds = [];
+    for (const pts of old) this.scene.remove(pts);
+    this.disposePoints(old);
   }
 
   private applyPointSize(size: number) {
@@ -70,12 +76,32 @@ export class PointCloudVisualizer {
   private currentPointSize = 0.02;
 
   async loadPaths(urls: string[], pointSize = this.currentPointSize): Promise<PointCloudStats> {
+    const seq = ++this.loadSeq;
+    const loaded: THREE.Points[] = [];
+    try {
+      for (const url of urls) {
+        const pts = await this.loadOne(url);
+        pts.visible = false;
+        this.applySizeTo(pts, pointSize);
+        loaded.push(pts);
+        if (seq !== this.loadSeq) {
+          this.disposePoints(loaded);
+          throw new DOMException('Superseded by newer load', 'AbortError');
+        }
+      }
+    } catch (e) {
+      if (seq === this.loadSeq) this.disposePoints(loaded);
+      else this.disposePoints(loaded);
+      throw e;
+    }
+    if (seq !== this.loadSeq) {
+      this.disposePoints(loaded);
+      throw new DOMException('Superseded by newer load', 'AbortError');
+    }
+    // Swap only on full success — failed loads keep the current view.
     this.clearClouds();
     this.currentPointSize = pointSize;
-    for (const url of urls) {
-      const pts = await this.loadOne(url);
-      pts.visible = false;
-      this.applySizeTo(pts, pointSize);
+    for (const pts of loaded) {
       this.clouds.push(pts);
       this.scene.add(pts);
     }
@@ -83,16 +109,34 @@ export class PointCloudVisualizer {
   }
 
   async loadFiles(files: File[], pointSize = this.currentPointSize): Promise<{ names: string[]; stats: PointCloudStats }> {
+    const seq = ++this.loadSeq;
+    const loaded: THREE.Points[] = [];
     const names: string[] = [];
+    try {
+      for (const f of files) {
+        const pts = await this.parseFile(f);
+        pts.visible = false;
+        this.applySizeTo(pts, pointSize);
+        loaded.push(pts);
+        names.push(f.name);
+        if (seq !== this.loadSeq) {
+          this.disposePoints(loaded);
+          throw new DOMException('Superseded by newer load', 'AbortError');
+        }
+      }
+    } catch (e) {
+      this.disposePoints(loaded);
+      throw e;
+    }
+    if (seq !== this.loadSeq) {
+      this.disposePoints(loaded);
+      throw new DOMException('Superseded by newer load', 'AbortError');
+    }
     this.clearClouds();
     this.currentPointSize = pointSize;
-    for (const f of files) {
-      const pts = await this.parseFile(f);
-      pts.visible = false;
-      this.applySizeTo(pts, pointSize);
+    for (const pts of loaded) {
       this.clouds.push(pts);
       this.scene.add(pts);
-      names.push(f.name);
     }
     return { names, stats: this.getStats() };
   }
@@ -103,15 +147,19 @@ export class PointCloudVisualizer {
   }
 
   private async loadOne(url: string): Promise<THREE.Points> {
-    const lower = url.split('?')[0].toLowerCase();
-    if (lower.endsWith('.ply')) {
-      const geom = await new PLYLoader().loadAsync(url);
+    // Blob URLs carry no extension, so uploads append a "#.ply" / "#.pcd" hint
+    // fragment (ignored by fetch). Detect from the full string, fetch the base.
+    const lower = url.toLowerCase();
+    const isPly = lower.includes('.ply');
+    const fetchUrl = url.split('#')[0];
+    if (isPly) {
+      const geom = await this.plyLoader.loadAsync(fetchUrl);
       const mat = new THREE.PointsMaterial({ size: this.currentPointSize, vertexColors: geom.hasAttribute('color') });
       const pts = new THREE.Points(geom, mat);
       pts.name = url;
       return pts;
     }
-    const pts = await this.pcdLoader.loadAsync(url);
+    const pts = await this.pcdLoader.loadAsync(fetchUrl);
     this.applySizeTo(pts, this.currentPointSize);
     pts.name = url;
     return pts;
@@ -137,8 +185,11 @@ export class PointCloudVisualizer {
   }
 
   showFrame(index: number) {
+    const n = this.clouds.length;
+    if (n === 0) return;
+    const clamped = ((Math.trunc(index) % n) + n) % n;
     this.clouds.forEach((pts, i) => {
-      pts.visible = i === index;
+      pts.visible = i === clamped;
     });
   }
 
@@ -181,6 +232,7 @@ export class PointCloudVisualizer {
 
   dispose() {
     this.disposed = true;
+    this.loadSeq++;
     cancelAnimationFrame(this.animationId);
     this.clearClouds();
     this.controls.dispose();
