@@ -155,6 +155,12 @@ const App = () => {
     engine.removeMeasurement(pending.markerId);
     pendingRef.current = null;
     const m = engine.addMeasurement(pending.point, point);
+    if (m.distance < 1e-9) {
+      // Same-spot double-click: drop the zero-length measurement.
+      engine.removeMeasurement(m.id);
+      setMeasureHint('Pick two different points to measure a distance.');
+      return;
+    }
     setMeasurements((prev) => [...prev, m]);
     setMeasureHint(null);
   };

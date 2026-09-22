@@ -63,29 +63,40 @@ export const PointCloudViewer = ({
     });
     ro.observe(containerRef.current);
 
-    // Measure clicks: only clean clicks (no orbit drag) while measure mode
-    // is on. Listeners live on the canvas for the engine lifetime; mode and
-    // callback go through refs so no re-subscription is needed.
+    // Measure clicks: only clean primary-button clicks (no orbit drag) while
+    // measure mode is on. Listeners live on the canvas for the engine
+    // lifetime; mode and callback go through refs so no re-subscription
+    // is needed.
     const canvas = engine.getCanvas();
+    let downId = -1;
     let downX = 0;
     let downY = 0;
     const onPointerDown = (e: PointerEvent) => {
+      downId = e.pointerId;
       downX = e.clientX;
       downY = e.clientY;
     };
     const onPointerUp = (e: PointerEvent) => {
       if (!measureModeRef.current) return;
+      // Ignore right/middle-click pans and non-primary touches (pinch zoom).
+      if (e.pointerId !== downId || e.button !== 0 || e.isPrimary === false) return;
+      downId = -1;
       if (Math.hypot(e.clientX - downX, e.clientY - downY) > 6) return;
       const current = engineRef.current;
       if (!current) return;
       measureCb.current?.(current.measureAt(e.clientX, e.clientY));
     };
+    const onPointerCancel = () => {
+      downId = -1;
+    };
     canvas.addEventListener('pointerdown', onPointerDown);
     canvas.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('pointercancel', onPointerCancel);
 
     return () => {
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('pointerup', onPointerUp);
+      canvas.removeEventListener('pointercancel', onPointerCancel);
       ro.disconnect();
       engine.dispose();
       engineRef.current = null;
