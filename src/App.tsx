@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { PointCloudViewer } from './components/PointCloudViewer';
 import { NavigationPanel } from './components/NavigationPanel';
-import type { MeasurePoint, Measurement, PointCloudVisualizer, PointCloudStats } from './components/PointCloudVisualizer';
+import type { ClipAxis, MeasurePoint, Measurement, PointCloudVisualizer, PointCloudStats } from './components/PointCloudVisualizer';
 
 const SAMPLE_LABELS = ['sphere.pcd', 'cuboid.pcd'];
 const SAMPLE_MODELS = ['/assets/sphere.pcd', '/assets/cuboid.pcd'];
@@ -23,6 +23,13 @@ const App = () => {
   const [measureMode, setMeasureMode] = useState(false);
   const [measurements, setMeasurements] = useState<Measurement[]>([]);
   const [measureHint, setMeasureHint] = useState<string | null>(null);
+  const [clip, setClip] = useState<{ enabled: boolean; axis: ClipAxis; t: number; flip: boolean }>({
+    enabled: false,
+    axis: 'y',
+    t: 0.5,
+    flip: false,
+  });
+  const [clipCut, setClipCut] = useState<number | null>(null);
   const engineRef = useRef<PointCloudVisualizer | null>(null);
   // Pending first click of a measurement + its temporary marker id.
   const pendingRef = useRef<{ point: MeasurePoint; markerId: number } | null>(null);
@@ -82,12 +89,37 @@ const App = () => {
     if (pending) engineRef.current?.removeMeasurement(pending.markerId);
   };
 
+  const applyClip = (c: { enabled: boolean; axis: ClipAxis; t: number; flip: boolean }) => {
+    const engine = engineRef.current;
+    if (!engine) {
+      setClipCut(null);
+      return;
+    }
+    if (!c.enabled) {
+      engine.setClip(null, 0, false);
+      setClipCut(null);
+      return;
+    }
+    engine.setClip(c.axis, c.t, c.flip);
+    const range = engine.getClipRange(c.axis);
+    setClipCut(range ? range.min + Math.min(1, Math.max(0, c.t)) * (range.max - range.min) : null);
+  };
+
+  const updateClip = (patch: Partial<{ enabled: boolean; axis: ClipAxis; t: number; flip: boolean }>) => {
+    const next = { ...clip, ...patch };
+    setClip(next);
+    applyClip(next);
+  };
+
   const handleStats = (s: PointCloudStats, sourceUrls: string[]) => {
     setStats(s);
     // New models invalidate measurements (engine already cleared overlays).
     cancelPending();
     setMeasurements([]);
     setMeasureHint(null);
+    // Bounding box changed — reapply the active clip to the new materials.
+    // (handleStats is re-registered every render, so this `clip` is fresh.)
+    applyClip(clip);
     // Use the URLs that actually loaded (not closed-over state) so rapid
     // uploads can't record the wrong set as last-good. Labels mirror the
     // current state at success time, which corresponds to sourceUrls.
@@ -227,6 +259,48 @@ const App = () => {
           <button type="button" onClick={resetSamples}>
             Load samples
           </button>
+          <label style={{ fontSize: 14 }}>
+            <input
+              type="checkbox"
+              checked={clip.enabled}
+              onChange={(e) => updateClip({ enabled: e.target.checked })}
+            />{' '}
+            Clip
+          </label>
+          {clip.enabled && (
+            <>
+              <label style={{ fontSize: 14 }}>
+                Axis{' '}
+                <select
+                  value={clip.axis}
+                  onChange={(e) => updateClip({ axis: e.target.value as ClipAxis })}
+                >
+                  <option value="x">X</option>
+                  <option value="y">Y</option>
+                  <option value="z">Z</option>
+                </select>
+              </label>
+              <label style={{ fontSize: 14 }}>
+                Cut {(clip.t * 100).toFixed(0)}%{clipCut !== null ? ` (${clipCut.toFixed(3)})` : ''}{' '}
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={clip.t}
+                  onChange={(e) => updateClip({ t: Number(e.target.value) })}
+                />
+              </label>
+              <label style={{ fontSize: 14 }}>
+                <input
+                  type="checkbox"
+                  checked={clip.flip}
+                  onChange={(e) => updateClip({ flip: e.target.checked })}
+                />{' '}
+                Keep upper
+              </label>
+            </>
+          )}
           <button
             type="button"
             onClick={toggleMeasure}
