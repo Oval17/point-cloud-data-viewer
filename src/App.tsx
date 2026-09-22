@@ -1,51 +1,145 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { PointCloudViewer } from './components/PointCloudViewer';
 import { NavigationPanel } from './components/NavigationPanel';
+import type { PointCloudVisualizer, PointCloudStats } from './components/PointCloudVisualizer';
+
+const SAMPLE_LABELS = ['sphere.pcd', 'cuboid.pcd'];
+const SAMPLE_MODELS = ['/assets/sphere.pcd', '/assets/cuboid.pcd'];
+
+const isBlobUrl = (u: string) => u.startsWith('blob:');
+const withExtHint = (base: string, name: string) =>
+  /\.ply$/i.test(name) ? `${base}#.ply` : `${base}#.pcd`;
+const revokeBlobs = (urls: string[]) => {
+  urls.filter(isBlobUrl).forEach((u) => URL.revokeObjectURL(u.split('#')[0]));
+};
 
 const App = () => {
-  const geometricModelAssets = [
-    '/assets/sphere.pcd',
-    '/assets/cuboid.pcd',
-  ];
+  const [modelLabels, setModelLabels] = useState<string[]>(SAMPLE_LABELS);
+  const [modelUrls, setModelUrls] = useState<string[]>(SAMPLE_MODELS);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [pointSize, setPointSize] = useState(0.02);
+  const [stats, setStats] = useState<PointCloudStats | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const engineRef = useRef<PointCloudVisualizer | null>(null);
+  // Last successfully loaded set + old blob URLs waiting to be revoked on success.
+  const lastGood = useRef({ labels: SAMPLE_LABELS, urls: SAMPLE_MODELS });
+  const pendingOldBlobs = useRef<string[]>([]);
 
-  const [activeGeometryIndex, setActiveGeometryIndex] = useState(0);
+  useEffect(
+    () => () => {
+      revokeBlobs(pendingOldBlobs.current);
+      revokeBlobs(lastGood.current.urls);
+    },
+    []
+  );
 
-  const applicationContainerStyles = {
-    minHeight: '100vh',
-    backgroundColor: '#ecf0f1',
-    padding: '20px',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+  const handleFiles = (files: FileList | File[]) => {
+    const list = Array.from(files).filter((f) => /\.pcd$|\.ply$/i.test(f.name));
+    if (list.length === 0) {
+      setError('Please choose .pcd or .ply files');
+      return;
+    }
+    setError(null);
+    setStats(null);
+    // Single source of truth: hinted blob URLs loaded via the Viewer's loadPaths.
+    // Previous blobs are revoked only after the new set loads successfully.
+    pendingOldBlobs.current = modelUrls.filter(isBlobUrl);
+    const urls = list.map((f) => withExtHint(URL.createObjectURL(f), f.name));
+    setModelLabels(list.map((f) => f.name));
+    setModelUrls(urls);
+    setActiveIndex(0);
   };
 
-  const titleStyles = {
-    textAlign: 'center' as const,
-    color: '#2c3e50',
-    fontSize: '28px',
-    fontWeight: 'bold',
-    marginBottom: '20px',
-    textShadow: '2px 2px 4px rgba(0,0,0,0.1)'
+  const handleStats = (s: PointCloudStats) => {
+    setStats(s);
+    lastGood.current = { labels: modelLabels, urls: modelUrls };
+    revokeBlobs(pendingOldBlobs.current);
+    pendingOldBlobs.current = [];
   };
 
-  const mainContentStyles = {
-    maxWidth: '1200px',
-    margin: '0 auto',
-    backgroundColor: '#ffffff',
-    borderRadius: '12px',
-    padding: '25px',
-    boxShadow: '0 10px 25px rgba(0, 0, 0, 0.15)'
+  const handleError = (message: string) => {
+    // Ignore superseded-load aborts from rapid switching.
+    if (/abort/i.test(message)) return;
+    setStats(null);
+    setError(message);
+    // Revoke the failed blob URLs and revert to the last good set.
+    revokeBlobs(modelUrls.filter(isBlobUrl));
+    pendingOldBlobs.current = [];
+    setModelLabels(lastGood.current.labels);
+    setModelUrls(lastGood.current.urls);
+    setActiveIndex(0);
+  };
+
+  const resetSamples = () => {
+    pendingOldBlobs.current = modelUrls.filter(isBlobUrl);
+    setModelLabels(SAMPLE_LABELS);
+    setModelUrls(SAMPLE_MODELS);
+    setActiveIndex(0);
+    setError(null);
+    setStats(null);
   };
 
   return (
-    <div style={applicationContainerStyles}>
-      <div style={mainContentStyles}>
-        <h1 style={titleStyles}>3D Geometric Point Cloud Visualizer</h1>
-        <PointCloudViewer 
-          geometryPaths={geometricModelAssets} 
-          selectedModelIndex={activeGeometryIndex} 
+    <div style={{ minHeight: '100vh', backgroundColor: '#ecf0f1', padding: 20, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
+      <div style={{ maxWidth: 1200, margin: '0 auto', backgroundColor: '#fff', borderRadius: 12, padding: 25, boxShadow: '0 10px 25px rgba(0,0,0,0.15)' }}>
+        <h1 style={{ textAlign: 'center', color: '#2c3e50', fontSize: 26, marginBottom: 12 }}>
+          3D Point Cloud Visualizer
+        </h1>
+
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center', marginBottom: 12 }}>
+          <label style={{ fontSize: 14 }}>
+            Upload .pcd / .ply{' '}
+            <input
+              type="file"
+              accept=".pcd,.ply"
+              multiple
+              onChange={(e) => {
+                if (e.target.files) handleFiles(e.target.files);
+                e.target.value = '';
+              }}
+            />
+          </label>
+          <label style={{ fontSize: 14 }}>
+            Point size {pointSize.toFixed(3)}{' '}
+            <input
+              type="range"
+              min={0.005}
+              max={0.1}
+              step={0.005}
+              value={pointSize}
+              onChange={(e) => setPointSize(Number(e.target.value))}
+            />
+          </label>
+          <button type="button" onClick={() => engineRef.current?.resetView()}>
+            Reset view
+          </button>
+          <button type="button" onClick={resetSamples}>
+            Load samples
+          </button>
+          <span style={{ fontSize: 13, color: '#555' }} data-testid="pcd-stats">
+            {stats
+              ? `${stats.modelCount} model(s) · ${stats.totalPoints.toLocaleString()} pts · viewing ${modelLabels[activeIndex] ?? ''}`
+              : `viewing ${modelLabels[activeIndex] ?? ''}`}
+          </span>
+        </div>
+
+        {error && (
+          <p role="alert" style={{ color: '#b91c1c', fontSize: 14 }}>
+            {error}
+          </p>
+        )}
+
+        <PointCloudViewer
+          geometryPaths={modelUrls}
+          selectedModelIndex={activeIndex}
+          pointSize={pointSize}
+          engineRef={engineRef}
+          onStats={handleStats}
+          onError={handleError}
         />
-        <NavigationPanel 
-          modelPaths={geometricModelAssets} 
-          setActiveGeometry={setActiveGeometryIndex}
+        <NavigationPanel
+          modelPaths={modelLabels}
+          setActiveGeometry={setActiveIndex}
         />
       </div>
     </div>
