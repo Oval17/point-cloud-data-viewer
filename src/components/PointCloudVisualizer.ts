@@ -22,6 +22,8 @@ export interface Measurement extends MeasurePoint {
   distance: number;
 }
 
+export type ClipAxis = 'x' | 'y' | 'z';
+
 export class PointCloudVisualizer {
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
@@ -44,6 +46,9 @@ export class PointCloudVisualizer {
   private markerMat = new THREE.MeshBasicMaterial({ color: 0xfacc15, depthTest: false });
   private pendingMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, depthTest: false });
   private lineMat = new THREE.LineBasicMaterial({ color: 0xfacc15, depthTest: false });
+  // Single user clipping plane (null = disabled). Reapplied to materials on
+  // every load swap since materials are recreated per load.
+  private clipPlane: THREE.Plane | null = null;
 
   constructor(displayContainer: HTMLElement) {
     this.container = displayContainer;
@@ -59,6 +64,7 @@ export class PointCloudVisualizer {
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(w, h);
+    this.renderer.localClippingEnabled = true;
     displayContainer.appendChild(this.renderer.domElement);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -131,6 +137,8 @@ export class PointCloudVisualizer {
       this.clouds.push(pts);
       this.scene.add(pts);
     }
+    // Materials are recreated per load — reattach the active clip plane.
+    this.applyClipToClouds();
     return this.getStats();
   }
 
@@ -198,7 +206,51 @@ export class PointCloudVisualizer {
     this.renderer.setSize(width, height);
   }
 
-  /** Canvas element for attaching pointer listeners (Viewer-owned). */
+  private applyClipToClouds() {
+    for (const pts of this.clouds) {
+      const mat = pts.material as THREE.PointsMaterial;
+      mat.clippingPlanes = this.clipPlane ? [this.clipPlane] : null;
+      // Plane count feeds the shader program key — force recompile on 0↔1 toggles.
+      mat.needsUpdate = true;
+    }
+  }
+
+  /** Bounding box over all loaded clouds (stable across frame switches). */
+  getClipRange(axis: ClipAxis): { min: number; max: number } | null {
+    if (this.clouds.length === 0) return null;
+    const box = new THREE.Box3();
+    for (const pts of this.clouds) box.union(new THREE.Box3().setFromObject(pts));
+    if (box.isEmpty()) return null;
+    return { min: box.min[axis], max: box.max[axis] };
+  }
+
+  /**
+   * Position a single clipping plane at fraction t (0..1) of the loaded
+   * bounding box along axis. Default keeps the lower side; flip keeps upper.
+   * Pass axis=null (or t outside range after clamp fails) to disable.
+   */
+  setClip(axis: ClipAxis | null, t: number, flip: boolean) {
+    if (axis === null) {
+      this.clipPlane = null;
+      this.applyClipToClouds();
+      return;
+    }
+    const range = this.getClipRange(axis);
+    if (!range || !(range.max > range.min)) {
+      this.clipPlane = null;
+      this.applyClipToClouds();
+      return;
+    }
+    const clamped = Math.min(1, Math.max(0, t));
+    const cut = range.min + clamped * (range.max - range.min);
+    // three.js keeps fragments with signed distance >= 0:
+    // distance = normal.dot(p) + constant.
+    const normal = new THREE.Vector3();
+    normal[axis] = flip ? 1 : -1;
+    const constant = -cut * (flip ? 1 : -1);
+    this.clipPlane = new THREE.Plane(normal, constant);
+    this.applyClipToClouds();
+  }
   getCanvas(): HTMLCanvasElement {
     return this.renderer.domElement;
   }
