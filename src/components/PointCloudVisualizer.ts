@@ -1,85 +1,192 @@
 import * as THREE from 'three';
-import { OrbitControls, PCDLoader } from 'three/examples/jsm/Addons.js';
+import { OrbitControls, PCDLoader, PLYLoader } from 'three/examples/jsm/Addons.js';
+
+export interface PointCloudStats {
+  modelCount: number;
+  pointCounts: number[];
+  totalPoints: number;
+}
 
 export class PointCloudVisualizer {
-  private spatialEnvironment: THREE.Scene;
-  private perspectiveViewpoint: THREE.PerspectiveCamera;
-  private webGLRenderingEngine: THREE.WebGLRenderer;
-  private orbitNavigationControls: OrbitControls;
-  private pointCloudDataLoader: PCDLoader;
-  private geometricPointCollections: THREE.Points[] = [];
-  private htmlRenderingContainer: HTMLElement;
+  private scene: THREE.Scene;
+  private camera: THREE.PerspectiveCamera;
+  private renderer: THREE.WebGLRenderer;
+  private controls: OrbitControls;
+  private pcdLoader = new PCDLoader();
+  private plyLoader = new PLYLoader();
+  private clouds: THREE.Points[] = [];
+  private container: HTMLElement;
+  private animationId = 0;
+  private disposed = false;
+  private defaultCamPos = new THREE.Vector3(2, 2, 2);
 
   constructor(displayContainer: HTMLElement) {
-    this.htmlRenderingContainer = displayContainer;
-    this.spatialEnvironment = new THREE.Scene();
-    this.spatialEnvironment.background = new THREE.Color(0x111111);
+    this.container = displayContainer;
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0x111111);
 
-    const containerWidth = displayContainer.clientWidth;
-    const containerHeight = displayContainer.clientHeight;
+    const w = displayContainer.clientWidth || 800;
+    const h = displayContainer.clientHeight || 600;
 
-    this.perspectiveViewpoint = new THREE.PerspectiveCamera(75, containerWidth / containerHeight, 0.1, 1000);
-    this.perspectiveViewpoint.position.set(2, 2, 2);
+    this.camera = new THREE.PerspectiveCamera(75, w / h, 0.1, 2000);
+    this.camera.position.copy(this.defaultCamPos);
 
-    this.webGLRenderingEngine = new THREE.WebGLRenderer({ 
-      antialias: true,
-      alpha: true 
-    });
-    this.webGLRenderingEngine.setSize(containerWidth, containerHeight);
-    this.webGLRenderingEngine.shadowMap.enabled = true;
-    this.webGLRenderingEngine.shadowMap.type = THREE.PCFSoftShadowMap;
-    displayContainer.appendChild(this.webGLRenderingEngine.domElement);
+    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setSize(w, h);
+    displayContainer.appendChild(this.renderer.domElement);
 
-    this.orbitNavigationControls = new OrbitControls(this.perspectiveViewpoint, this.webGLRenderingEngine.domElement);
-    this.orbitNavigationControls.enableDamping = true;
-    this.orbitNavigationControls.dampingFactor = 0.05;
-    this.orbitNavigationControls.enableZoom = true;
-    this.orbitNavigationControls.enablePan = true;
+    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+    this.controls.enableDamping = true;
+    this.controls.dampingFactor = 0.05;
 
-    this.pointCloudDataLoader = new PCDLoader();
-    
-    // Add ambient lighting for better visibility
-    const ambientIllumination = new THREE.AmbientLight(0x404040, 0.6);
-    this.spatialEnvironment.add(ambientIllumination);
-    
-    // Add directional lighting
-    const directionalIllumination = new THREE.DirectionalLight(0xffffff, 0.8);
-    directionalIllumination.position.set(10, 10, 5);
-    this.spatialEnvironment.add(directionalIllumination);
+    this.scene.add(new THREE.AmbientLight(0x404040, 0.8));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+    dir.position.set(10, 10, 5);
+    this.scene.add(dir);
   }
 
-  async loadPointClouds(geometryUrls: string[]) {
-    for (const resourceUrl of geometryUrls) {
-      const pointCloudGeometry = await this.pointCloudDataLoader.loadAsync(resourceUrl);
-      pointCloudGeometry.visible = false;
-      this.geometricPointCollections.push(pointCloudGeometry);
-      this.spatialEnvironment.add(pointCloudGeometry);
+  private clearClouds() {
+    for (const pts of this.clouds) {
+      this.scene.remove(pts);
+      pts.geometry.dispose();
+      const mat = pts.material as THREE.Material | THREE.Material[];
+      if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
+      else mat.dispose();
+    }
+    this.clouds = [];
+  }
+
+  private applyPointSize(size: number) {
+    for (const pts of this.clouds) {
+      const mat = pts.material as THREE.PointsMaterial;
+      if ('size' in mat) {
+        mat.size = size;
+        mat.needsUpdate = true;
+      }
     }
   }
 
-  showFrame(geometryIndex: number) {
-    this.geometricPointCollections.forEach((pointCloud, currentIndex) => {
-      pointCloud.visible = currentIndex === geometryIndex;
+  private currentPointSize = 0.02;
+
+  async loadPaths(urls: string[], pointSize = this.currentPointSize): Promise<PointCloudStats> {
+    this.clearClouds();
+    this.currentPointSize = pointSize;
+    for (const url of urls) {
+      const pts = await this.loadOne(url);
+      pts.visible = false;
+      this.applySizeTo(pts, pointSize);
+      this.clouds.push(pts);
+      this.scene.add(pts);
+    }
+    return this.getStats();
+  }
+
+  async loadFiles(files: File[], pointSize = this.currentPointSize): Promise<{ names: string[]; stats: PointCloudStats }> {
+    const names: string[] = [];
+    this.clearClouds();
+    this.currentPointSize = pointSize;
+    for (const f of files) {
+      const pts = await this.parseFile(f);
+      pts.visible = false;
+      this.applySizeTo(pts, pointSize);
+      this.clouds.push(pts);
+      this.scene.add(pts);
+      names.push(f.name);
+    }
+    return { names, stats: this.getStats() };
+  }
+
+  private applySizeTo(pts: THREE.Points, size: number) {
+    const mat = pts.material as THREE.PointsMaterial;
+    if ('size' in mat) mat.size = size;
+  }
+
+  private async loadOne(url: string): Promise<THREE.Points> {
+    const lower = url.split('?')[0].toLowerCase();
+    if (lower.endsWith('.ply')) {
+      const geom = await new PLYLoader().loadAsync(url);
+      const mat = new THREE.PointsMaterial({ size: this.currentPointSize, vertexColors: geom.hasAttribute('color') });
+      const pts = new THREE.Points(geom, mat);
+      pts.name = url;
+      return pts;
+    }
+    const pts = await this.pcdLoader.loadAsync(url);
+    this.applySizeTo(pts, this.currentPointSize);
+    pts.name = url;
+    return pts;
+  }
+
+  private async parseFile(file: File): Promise<THREE.Points> {
+    const buf = await file.arrayBuffer();
+    const lower = file.name.toLowerCase();
+    if (lower.endsWith('.ply')) {
+      const geom = this.plyLoader.parse(buf);
+      const mat = new THREE.PointsMaterial({ size: this.currentPointSize, vertexColors: geom.hasAttribute('color') });
+      const pts = new THREE.Points(geom, mat);
+      pts.name = file.name;
+      return pts;
+    }
+    if (lower.endsWith('.pcd')) {
+      const pts = this.pcdLoader.parse(buf) as THREE.Points;
+      this.applySizeTo(pts, this.currentPointSize);
+      pts.name = file.name;
+      return pts;
+    }
+    throw new Error(`Unsupported format: ${file.name} (use .pcd or .ply)`);
+  }
+
+  showFrame(index: number) {
+    this.clouds.forEach((pts, i) => {
+      pts.visible = i === index;
     });
+  }
+
+  setPointSize(size: number) {
+    this.currentPointSize = size;
+    this.applyPointSize(size);
+  }
+
+  resetView() {
+    this.camera.position.copy(this.defaultCamPos);
+    this.controls.target.set(0, 0, 0);
+    this.controls.update();
+  }
+
+  resize(width: number, height: number) {
+    if (width === 0 || height === 0) return;
+    this.camera.aspect = width / height;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(width, height);
+  }
+
+  getStats(): PointCloudStats {
+    const pointCounts = this.clouds.map((pts) => {
+      const pos = (pts.geometry as THREE.BufferGeometry).getAttribute('position') as THREE.BufferAttribute;
+      return pos ? pos.count : 0;
+    });
+    return {
+      modelCount: this.clouds.length,
+      pointCounts,
+      totalPoints: pointCounts.reduce((a, b) => a + b, 0),
+    };
   }
 
   animate = () => {
-    const renderingAnimationLoop = () => {
-      requestAnimationFrame(renderingAnimationLoop);
-      this.orbitNavigationControls.update();
-      this.webGLRenderingEngine.render(this.spatialEnvironment, this.perspectiveViewpoint);
-    }
-
-    renderingAnimationLoop();
-  }
+    if (this.disposed) return;
+    this.animationId = requestAnimationFrame(this.animate);
+    this.controls.update();
+    this.renderer.render(this.scene, this.camera);
+  };
 
   dispose() {
-    this.webGLRenderingEngine.dispose();
-    this.orbitNavigationControls.dispose();
-    this.geometricPointCollections.forEach(pointCloud => this.spatialEnvironment.remove(pointCloud));
-    
-    while (this.htmlRenderingContainer.firstChild) {
-      this.htmlRenderingContainer.removeChild(this.htmlRenderingContainer.firstChild);
+    this.disposed = true;
+    cancelAnimationFrame(this.animationId);
+    this.clearClouds();
+    this.controls.dispose();
+    this.renderer.dispose();
+    while (this.container.firstChild) {
+      this.container.removeChild(this.container.firstChild);
     }
   }
-} 
+}
