@@ -210,6 +210,8 @@ export class PointCloudVisualizer {
     for (const pts of this.clouds) {
       const mat = pts.material as THREE.PointsMaterial;
       mat.clippingPlanes = this.clipPlane ? [this.clipPlane] : null;
+      // Plane count feeds the shader program key — force recompile on 0↔1 toggles.
+      mat.needsUpdate = true;
     }
   }
 
