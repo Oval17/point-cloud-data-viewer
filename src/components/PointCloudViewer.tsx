@@ -1,13 +1,15 @@
 import { useEffect, useRef } from 'react';
-import { PointCloudVisualizer, type PointCloudStats } from './PointCloudVisualizer';
+import { PointCloudVisualizer, type MeasurePoint, type PointCloudStats } from './PointCloudVisualizer';
 
 type ViewerProps = {
   geometryPaths: string[];
   selectedModelIndex: number;
   pointSize: number;
   engineRef: React.MutableRefObject<PointCloudVisualizer | null>;
+  measureMode: boolean;
   onStats?: (stats: PointCloudStats, sourceUrls: string[]) => void;
   onError?: (message: string, failedUrls: string[]) => void;
+  onMeasurePoint?: (point: MeasurePoint | null) => void;
 };
 
 export const PointCloudViewer = ({
@@ -15,13 +17,17 @@ export const PointCloudViewer = ({
   selectedModelIndex,
   pointSize,
   engineRef,
+  measureMode,
   onStats,
   onError,
+  onMeasurePoint,
 }: ViewerProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const statsCb = useRef(onStats);
   const errorCb = useRef(onError);
   const pointSizeRef = useRef(pointSize);
+  const measureModeRef = useRef(measureMode);
+  const measureCb = useRef(onMeasurePoint);
 
   useEffect(() => {
     statsCb.current = onStats;
@@ -32,6 +38,12 @@ export const PointCloudViewer = ({
   useEffect(() => {
     pointSizeRef.current = pointSize;
   }, [pointSize]);
+  useEffect(() => {
+    measureModeRef.current = measureMode;
+  }, [measureMode]);
+  useEffect(() => {
+    measureCb.current = onMeasurePoint;
+  }, [onMeasurePoint]);
 
   // Stable key for the URL list (blob URLs never contain \0, but
   // JSON.stringify is exact and avoids delimiter-collision bugs).
@@ -51,7 +63,29 @@ export const PointCloudViewer = ({
     });
     ro.observe(containerRef.current);
 
+    // Measure clicks: only clean clicks (no orbit drag) while measure mode
+    // is on. Listeners live on the canvas for the engine lifetime; mode and
+    // callback go through refs so no re-subscription is needed.
+    const canvas = engine.getCanvas();
+    let downX = 0;
+    let downY = 0;
+    const onPointerDown = (e: PointerEvent) => {
+      downX = e.clientX;
+      downY = e.clientY;
+    };
+    const onPointerUp = (e: PointerEvent) => {
+      if (!measureModeRef.current) return;
+      if (Math.hypot(e.clientX - downX, e.clientY - downY) > 6) return;
+      const current = engineRef.current;
+      if (!current) return;
+      measureCb.current?.(current.measureAt(e.clientX, e.clientY));
+    };
+    canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('pointerup', onPointerUp);
+
     return () => {
+      canvas.removeEventListener('pointerdown', onPointerDown);
+      canvas.removeEventListener('pointerup', onPointerUp);
       ro.disconnect();
       engine.dispose();
       engineRef.current = null;
