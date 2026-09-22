@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { PointCloudViewer } from './components/PointCloudViewer';
 import { NavigationPanel } from './components/NavigationPanel';
-import type { PointCloudVisualizer, PointCloudStats } from './components/PointCloudVisualizer';
+import type { MeasurePoint, Measurement, PointCloudVisualizer, PointCloudStats } from './components/PointCloudVisualizer';
 
 const SAMPLE_LABELS = ['sphere.pcd', 'cuboid.pcd'];
 const SAMPLE_MODELS = ['/assets/sphere.pcd', '/assets/cuboid.pcd'];
@@ -20,7 +20,12 @@ const App = () => {
   const [pointSize, setPointSize] = useState(0.02);
   const [stats, setStats] = useState<PointCloudStats | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [measureMode, setMeasureMode] = useState(false);
+  const [measurements, setMeasurements] = useState<Measurement[]>([]);
+  const [measureHint, setMeasureHint] = useState<string | null>(null);
   const engineRef = useRef<PointCloudVisualizer | null>(null);
+  // Pending first click of a measurement + its temporary marker id.
+  const pendingRef = useRef<{ point: MeasurePoint; markerId: number } | null>(null);
   // Last successfully loaded set + old blob URLs waiting to be revoked on success.
   const lastGood = useRef({ labels: SAMPLE_LABELS, urls: SAMPLE_MODELS });
   const pendingOldBlobs = useRef<string[]>([]);
@@ -71,8 +76,18 @@ const App = () => {
     setActiveIndex(0);
   };
 
+  const cancelPending = () => {
+    const pending = pendingRef.current;
+    pendingRef.current = null;
+    if (pending) engineRef.current?.removeMeasurement(pending.markerId);
+  };
+
   const handleStats = (s: PointCloudStats, sourceUrls: string[]) => {
     setStats(s);
+    // New models invalidate measurements (engine already cleared overlays).
+    cancelPending();
+    setMeasurements([]);
+    setMeasureHint(null);
     // Use the URLs that actually loaded (not closed-over state) so rapid
     // uploads can't record the wrong set as last-good. Labels mirror the
     // current state at success time, which corresponds to sourceUrls.
@@ -116,6 +131,65 @@ const App = () => {
     setStats(null);
   };
 
+  const toggleMeasure = () => {
+    // Leaving measure mode abandons a half-finished measurement.
+    if (measureMode) cancelPending();
+    setMeasureMode((m) => !m);
+    setMeasureHint(null);
+  };
+
+  const handleMeasurePoint = (point: MeasurePoint | null) => {
+    if (!point) {
+      setMeasureHint('No point hit — click directly on the point cloud.');
+      return;
+    }
+    const engine = engineRef.current;
+    if (!engine) return;
+    const pending = pendingRef.current;
+    if (!pending) {
+      const markerId = engine.addPendingMarker(point);
+      pendingRef.current = { point, markerId };
+      setMeasureHint('First point set — click a second point.');
+      return;
+    }
+    engine.removeMeasurement(pending.markerId);
+    pendingRef.current = null;
+    const m = engine.addMeasurement(pending.point, point);
+    if (m.distance < 1e-9) {
+      // Same-spot double-click: drop the zero-length measurement.
+      engine.removeMeasurement(m.id);
+      setMeasureHint('Pick two different points to measure a distance.');
+      return;
+    }
+    setMeasurements((prev) => [...prev, m]);
+    setMeasureHint(null);
+  };
+
+  const deleteMeasurement = (id: number) => {
+    engineRef.current?.removeMeasurement(id);
+    setMeasurements((prev) => prev.filter((m) => m.id !== id));
+  };
+
+  const clearMeasurements = () => {
+    cancelPending();
+    engineRef.current?.clearMeasurements();
+    setMeasurements([]);
+    setMeasureHint(null);
+  };
+
+  // Escape abandons a half-finished measurement.
+  useEffect(() => {
+    if (!measureMode) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        cancelPending();
+        setMeasureHint(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [measureMode]);
+
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#ecf0f1', padding: 20, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
       <div style={{ maxWidth: 1200, margin: '0 auto', backgroundColor: '#fff', borderRadius: 12, padding: 25, boxShadow: '0 10px 25px rgba(0,0,0,0.15)' }}>
@@ -153,6 +227,14 @@ const App = () => {
           <button type="button" onClick={resetSamples}>
             Load samples
           </button>
+          <button
+            type="button"
+            onClick={toggleMeasure}
+            aria-pressed={measureMode}
+            style={measureMode ? { fontWeight: 'bold' } : undefined}
+          >
+            {measureMode ? 'Done measuring' : 'Measure'}
+          </button>
           <span style={{ fontSize: 13, color: '#555' }} data-testid="pcd-stats">
             {stats
               ? `${stats.modelCount} model(s) · ${stats.totalPoints.toLocaleString()} pts · viewing ${modelLabels[activeIndex] ?? ''}`
@@ -171,9 +253,43 @@ const App = () => {
           selectedModelIndex={activeIndex}
           pointSize={pointSize}
           engineRef={engineRef}
+          measureMode={measureMode}
           onStats={handleStats}
           onError={handleError}
+          onMeasurePoint={handleMeasurePoint}
         />
+        {(measureMode || measurements.length > 0) && (
+          <div style={{ marginTop: 12, fontSize: 14 }} data-testid="measurements">
+            {measureMode && (
+              <p style={{ margin: '0 0 8px', color: '#555' }}>
+                Measure mode: click two points on the cloud. Drag orbits, Esc cancels.
+                Distances are in model-space units.
+              </p>
+            )}
+            {measureHint && (
+              <p role="status" style={{ margin: '0 0 8px', color: '#92400e' }}>
+                {measureHint}
+              </p>
+            )}
+            {measurements.length > 0 && (
+              <>
+                <ul style={{ margin: '0 0 8px', paddingLeft: 20 }}>
+                  {measurements.map((m, i) => (
+                    <li key={m.id}>
+                      M{i + 1}: {m.distance.toFixed(3)} units{' '}
+                      <button type="button" onClick={() => deleteMeasurement(m.id)}>
+                        Delete
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <button type="button" onClick={clearMeasurements}>
+                  Clear measurements
+                </button>
+              </>
+            )}
+          </div>
+        )}
         <NavigationPanel
           modelPaths={modelLabels}
           setActiveGeometry={setActiveIndex}

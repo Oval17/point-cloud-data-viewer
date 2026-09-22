@@ -7,6 +7,21 @@ export interface PointCloudStats {
   totalPoints: number;
 }
 
+export interface MeasurePoint {
+  x: number;
+  y: number;
+  z: number;
+}
+
+export interface Measurement extends MeasurePoint {
+  id: number;
+  bx: number;
+  by: number;
+  bz: number;
+  /** Distance in model-space units. */
+  distance: number;
+}
+
 export class PointCloudVisualizer {
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
@@ -20,6 +35,15 @@ export class PointCloudVisualizer {
   private disposed = false;
   private loadSeq = 0;
   private defaultCamPos = new THREE.Vector3(2, 2, 2);
+  // Measurement overlays (marker spheres + connecting lines). Shared
+  // geometry/material are disposed once with the engine.
+  private measureGroup = new THREE.Group();
+  private measureItems = new Map<number, THREE.Group>();
+  private measureSeq = 0;
+  private markerGeo = new THREE.SphereGeometry(0.02, 12, 12);
+  private markerMat = new THREE.MeshBasicMaterial({ color: 0xfacc15, depthTest: false });
+  private pendingMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, depthTest: false });
+  private lineMat = new THREE.LineBasicMaterial({ color: 0xfacc15, depthTest: false });
 
   constructor(displayContainer: HTMLElement) {
     this.container = displayContainer;
@@ -45,6 +69,9 @@ export class PointCloudVisualizer {
     const dir = new THREE.DirectionalLight(0xffffff, 0.8);
     dir.position.set(10, 10, 5);
     this.scene.add(dir);
+    // Rendered on top so markers stay visible inside dense clouds.
+    this.measureGroup.renderOrder = 999;
+    this.scene.add(this.measureGroup);
   }
 
   private disposePoints(list: THREE.Points[]) {
@@ -98,6 +125,7 @@ export class PointCloudVisualizer {
     }
     // Swap only on full success — failed loads keep the current view.
     this.clearClouds();
+    this.clearMeasurements();
     this.currentPointSize = pointSize;
     for (const pts of loaded) {
       this.clouds.push(pts);
@@ -170,8 +198,89 @@ export class PointCloudVisualizer {
     this.renderer.setSize(width, height);
   }
 
-  getStats(): PointCloudStats {
-    const pointCounts = this.clouds.map((pts) => {
+  /** Canvas element for attaching pointer listeners (Viewer-owned). */
+  getCanvas(): HTMLCanvasElement {
+    return this.renderer.domElement;
+  }
+
+  /**
+   * Raycast a client-space click against the visible clouds.
+   * Returns the nearest hit in world space, or null on a miss.
+   */
+  measureAt(clientX: number, clientY: number): MeasurePoint | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    const ndc = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
+    );
+    const ray = new THREE.Raycaster();
+    // Points threshold is in world units: a few point-diameters so sparse
+    // regions stay clickable without matching the whole scene.
+    ray.params.Points = { threshold: Math.max(this.currentPointSize * 4, 0.005) };
+    ray.setFromCamera(ndc, this.camera);
+    const hits = ray.intersectObjects(
+      this.clouds.filter((c) => c.visible),
+      false
+    );
+    if (hits.length === 0) return null;
+    const p = hits[0].point;
+    return { x: p.x, y: p.y, z: p.z };
+  }
+
+  private marker(p: MeasurePoint, pending: boolean): THREE.Mesh {
+    const mesh = new THREE.Mesh(this.markerGeo, pending ? this.pendingMat : this.markerMat);
+    mesh.position.set(p.x, p.y, p.z);
+    return mesh;
+  }
+
+  /** Show a temporary first-click marker. Returns a marker id for removal. */
+  addPendingMarker(p: MeasurePoint): number {
+    const id = ++this.measureSeq;
+    const group = new THREE.Group();
+    group.add(this.marker(p, true));
+    this.measureGroup.add(group);
+    this.measureItems.set(id, group);
+    return id;
+  }
+
+  /** Commit a two-point measurement (markers + connecting line). */
+  addMeasurement(a: MeasurePoint, b: MeasurePoint): Measurement {
+    const id = ++this.measureSeq;
+    const va = new THREE.Vector3(a.x, a.y, a.z);
+    const vb = new THREE.Vector3(b.x, b.y, b.z);
+    const group = new THREE.Group();
+    group.add(this.marker(a, false));
+    group.add(this.marker(b, false));
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([va, vb]),
+      this.lineMat
+    );
+    group.add(line);
+    this.measureGroup.add(group);
+    this.measureItems.set(id, group);
+    return { id, x: a.x, y: a.y, z: a.z, bx: b.x, by: b.y, bz: b.z, distance: va.distanceTo(vb) };
+  }
+
+  removeMeasurement(id: number): boolean {
+    const group = this.measureItems.get(id);
+    if (!group) return false;
+    this.measureGroup.remove(group);
+    // Geometries/materials are shared (disposed with the engine), except
+    // per-measurement line geometry.
+    group.children.forEach((child) => {
+      if (child instanceof THREE.Line) child.geometry.dispose();
+    });
+    this.measureItems.delete(id);
+    return true;
+  }
+
+  clearMeasurements() {
+    const ids = [...this.measureItems.keys()];
+    ids.forEach((id) => this.removeMeasurement(id));
+  }
+
+  getStats(): PointCloudStats {    const pointCounts = this.clouds.map((pts) => {
       const pos = (pts.geometry as THREE.BufferGeometry).getAttribute('position') as THREE.BufferAttribute;
       return pos ? pos.count : 0;
     });
@@ -194,8 +303,13 @@ export class PointCloudVisualizer {
     this.loadSeq++;
     cancelAnimationFrame(this.animationId);
     this.clearClouds();
+    this.clearMeasurements();
     this.controls.dispose();
     this.renderer.dispose();
+    this.markerGeo.dispose();
+    this.markerMat.dispose();
+    this.pendingMat.dispose();
+    this.lineMat.dispose();
     while (this.container.firstChild) {
       this.container.removeChild(this.container.firstChild);
     }
