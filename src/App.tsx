@@ -24,6 +24,11 @@ const App = () => {
   // Last successfully loaded set + old blob URLs waiting to be revoked on success.
   const lastGood = useRef({ labels: SAMPLE_LABELS, urls: SAMPLE_MODELS });
   const pendingOldBlobs = useRef<string[]>([]);
+  // Mirror of current labels/urls so stats/error callbacks never read stale closures.
+  const labelsRef = useRef(SAMPLE_LABELS);
+  const urlsRef = useRef(SAMPLE_MODELS);
+  labelsRef.current = modelLabels;
+  urlsRef.current = modelUrls;
 
   useEffect(
     () => () => {
@@ -43,27 +48,30 @@ const App = () => {
     setStats(null);
     // Single source of truth: hinted blob URLs loaded via the Viewer's loadPaths.
     // Previous blobs are revoked only after the new set loads successfully.
-    pendingOldBlobs.current = modelUrls.filter(isBlobUrl);
+    pendingOldBlobs.current = urlsRef.current.filter(isBlobUrl);
     const urls = list.map((f) => withExtHint(URL.createObjectURL(f), f.name));
     setModelLabels(list.map((f) => f.name));
     setModelUrls(urls);
     setActiveIndex(0);
   };
 
-  const handleStats = (s: PointCloudStats) => {
+  const handleStats = (s: PointCloudStats, sourceUrls: string[]) => {
     setStats(s);
-    lastGood.current = { labels: modelLabels, urls: modelUrls };
+    // Use the URLs that actually loaded (not closed-over state) so rapid
+    // uploads can't record the wrong set as last-good. Labels mirror the
+    // current state at success time, which corresponds to sourceUrls.
+    lastGood.current = { labels: labelsRef.current, urls: sourceUrls };
     revokeBlobs(pendingOldBlobs.current);
     pendingOldBlobs.current = [];
   };
 
-  const handleError = (message: string) => {
+  const handleError = (message: string, failedUrls: string[]) => {
     // Ignore superseded-load aborts from rapid switching.
     if (/abort/i.test(message)) return;
     setStats(null);
     setError(message);
     // Revoke the failed blob URLs and revert to the last good set.
-    revokeBlobs(modelUrls.filter(isBlobUrl));
+    revokeBlobs(failedUrls.filter(isBlobUrl));
     pendingOldBlobs.current = [];
     setModelLabels(lastGood.current.labels);
     setModelUrls(lastGood.current.urls);
@@ -71,7 +79,7 @@ const App = () => {
   };
 
   const resetSamples = () => {
-    pendingOldBlobs.current = modelUrls.filter(isBlobUrl);
+    pendingOldBlobs.current = urlsRef.current.filter(isBlobUrl);
     setModelLabels(SAMPLE_LABELS);
     setModelUrls(SAMPLE_MODELS);
     setActiveIndex(0);
