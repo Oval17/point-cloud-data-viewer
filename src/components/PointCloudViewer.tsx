@@ -6,8 +6,8 @@ type ViewerProps = {
   selectedModelIndex: number;
   pointSize: number;
   engineRef: React.MutableRefObject<PointCloudVisualizer | null>;
-  onStats?: (stats: PointCloudStats) => void;
-  onError?: (message: string) => void;
+  onStats?: (stats: PointCloudStats, sourceUrls: string[]) => void;
+  onError?: (message: string, failedUrls: string[]) => void;
 };
 
 export const PointCloudViewer = ({
@@ -21,8 +21,21 @@ export const PointCloudViewer = ({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const statsCb = useRef(onStats);
   const errorCb = useRef(onError);
-  statsCb.current = onStats;
-  errorCb.current = onError;
+  const pointSizeRef = useRef(pointSize);
+
+  useEffect(() => {
+    statsCb.current = onStats;
+  }, [onStats]);
+  useEffect(() => {
+    errorCb.current = onError;
+  }, [onError]);
+  useEffect(() => {
+    pointSizeRef.current = pointSize;
+  }, [pointSize]);
+
+  // Stable key for the URL list (blob URLs never contain \0, but
+  // JSON.stringify is exact and avoids delimiter-collision bugs).
+  const pathsKey = JSON.stringify(geometryPaths);
 
   // Init engine once
   useEffect(() => {
@@ -46,27 +59,36 @@ export const PointCloudViewer = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Load paths when list changes
+  // Load paths when list changes. pointSize is read via ref so slider
+  // moves don't retrigger full reloads (size applied by the effect below).
   useEffect(() => {
     let cancelled = false;
     const engine = engineRef.current;
     if (!engine) return;
+    const paths: string[] = JSON.parse(pathsKey);
+    const size = pointSizeRef.current;
     engine
-      .loadPaths(geometryPaths, pointSize)
+      .loadPaths(paths, size)
       .then((stats) => {
         if (cancelled) return;
         engine.showFrame(selectedModelIndex);
-        statsCb.current?.(stats);
+        statsCb.current?.(stats, paths);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        errorCb.current?.(err instanceof Error ? err.message : 'Failed to load point clouds');
+        errorCb.current?.(
+          err instanceof Error ? err.message : 'Failed to load point clouds',
+          paths
+        );
       });
     return () => {
       cancelled = true;
     };
+    // pathsKey is the stable serialization of geometryPaths.
+    // selectedModelIndex is applied after load; live selection changes
+    // go through the showFrame effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [geometryPaths.join('|')]);
+  }, [pathsKey]);
 
   // Selection + point size updates
   useEffect(() => {

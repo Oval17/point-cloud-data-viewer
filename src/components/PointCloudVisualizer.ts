@@ -80,9 +80,8 @@ export class PointCloudVisualizer {
     const loaded: THREE.Points[] = [];
     try {
       for (const url of urls) {
-        const pts = await this.loadOne(url);
+        const pts = await this.loadOne(url, pointSize);
         pts.visible = false;
-        this.applySizeTo(pts, pointSize);
         loaded.push(pts);
         if (seq !== this.loadSeq) {
           this.disposePoints(loaded);
@@ -90,8 +89,7 @@ export class PointCloudVisualizer {
         }
       }
     } catch (e) {
-      if (seq === this.loadSeq) this.disposePoints(loaded);
-      else this.disposePoints(loaded);
+      this.disposePoints(loaded);
       throw e;
     }
     if (seq !== this.loadSeq) {
@@ -108,45 +106,24 @@ export class PointCloudVisualizer {
     return this.getStats();
   }
 
-  async loadFiles(files: File[], pointSize = this.currentPointSize): Promise<{ names: string[]; stats: PointCloudStats }> {
-    const seq = ++this.loadSeq;
-    const loaded: THREE.Points[] = [];
-    const names: string[] = [];
-    try {
-      for (const f of files) {
-        const pts = await this.parseFile(f);
-        pts.visible = false;
-        this.applySizeTo(pts, pointSize);
-        loaded.push(pts);
-        names.push(f.name);
-        if (seq !== this.loadSeq) {
-          this.disposePoints(loaded);
-          throw new DOMException('Superseded by newer load', 'AbortError');
-        }
-      }
-    } catch (e) {
-      this.disposePoints(loaded);
-      throw e;
-    }
-    if (seq !== this.loadSeq) {
-      this.disposePoints(loaded);
-      throw new DOMException('Superseded by newer load', 'AbortError');
-    }
-    this.clearClouds();
-    this.currentPointSize = pointSize;
-    for (const pts of loaded) {
-      this.clouds.push(pts);
-      this.scene.add(pts);
-    }
-    return { names, stats: this.getStats() };
-  }
-
   private applySizeTo(pts: THREE.Points, size: number) {
     const mat = pts.material as THREE.PointsMaterial;
-    if ('size' in mat) mat.size = size;
+    if ('size' in mat) {
+      mat.size = size;
+      mat.needsUpdate = true;
+    }
   }
 
-  private async loadOne(url: string): Promise<THREE.Points> {
+  private ensureVertexColors(pts: THREE.Points) {
+    const geom = pts.geometry as THREE.BufferGeometry;
+    const mat = pts.material as THREE.PointsMaterial;
+    if (geom.hasAttribute('color') && 'vertexColors' in mat && !mat.vertexColors) {
+      mat.vertexColors = true;
+      mat.needsUpdate = true;
+    }
+  }
+
+  private async loadOne(url: string, pointSize: number): Promise<THREE.Points> {
     // Blob URLs carry no extension, so uploads append a "#.ply" / "#.pcd" hint
     // fragment (ignored by fetch). Detect from the full string, fetch the base.
     const lower = url.toLowerCase();
@@ -154,34 +131,16 @@ export class PointCloudVisualizer {
     const fetchUrl = url.split('#')[0];
     if (isPly) {
       const geom = await this.plyLoader.loadAsync(fetchUrl);
-      const mat = new THREE.PointsMaterial({ size: this.currentPointSize, vertexColors: geom.hasAttribute('color') });
+      const mat = new THREE.PointsMaterial({ size: pointSize, vertexColors: geom.hasAttribute('color') });
       const pts = new THREE.Points(geom, mat);
       pts.name = url;
       return pts;
     }
     const pts = await this.pcdLoader.loadAsync(fetchUrl);
-    this.applySizeTo(pts, this.currentPointSize);
+    this.applySizeTo(pts, pointSize);
+    this.ensureVertexColors(pts);
     pts.name = url;
     return pts;
-  }
-
-  private async parseFile(file: File): Promise<THREE.Points> {
-    const buf = await file.arrayBuffer();
-    const lower = file.name.toLowerCase();
-    if (lower.endsWith('.ply')) {
-      const geom = this.plyLoader.parse(buf);
-      const mat = new THREE.PointsMaterial({ size: this.currentPointSize, vertexColors: geom.hasAttribute('color') });
-      const pts = new THREE.Points(geom, mat);
-      pts.name = file.name;
-      return pts;
-    }
-    if (lower.endsWith('.pcd')) {
-      const pts = this.pcdLoader.parse(buf) as THREE.Points;
-      this.applySizeTo(pts, this.currentPointSize);
-      pts.name = file.name;
-      return pts;
-    }
-    throw new Error(`Unsupported format: ${file.name} (use .pcd or .ply)`);
   }
 
   showFrame(index: number) {
