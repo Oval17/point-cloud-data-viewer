@@ -4,10 +4,15 @@ A modern 3D point cloud visualization tool built with React, TypeScript, and Thr
 
 ## Features
 
-- **PointCloudViewer**: Interactive 3D viewer with orbit controls
-- **PointCloudVisualizer**: Advanced scene management and rendering
-- **ThreeDimensionalRenderer**: Optimized point cloud loading and display
-- **NavigationPanel**: Simple frame navigation controls
+- **Load .pcd / .ply files** — drag files in via the upload picker, or use the
+  bundled samples (`sphere.pcd`, `cuboid.pcd`)
+- **Interactive 3D viewer** — orbit, zoom and pan with damped controls
+- **Point size control** — live slider from 0.005 to 0.1 world units
+- **Distance measuring** — click two points on the cloud (Measure mode);
+  Esc or "Done measuring" finishes, results can be deleted individually
+- **Axis clipping plane** — slice the model along X/Y/Z at any fraction,
+  optionally keeping the upper side
+- **Navigation panel** — step through loaded models (Previous / Next)
 
 ## Quick Start
 
@@ -30,11 +35,14 @@ Includes two geometric point cloud models:
 
 ## Tech Stack
 
-- React 18
+- React 19
 - TypeScript
 - Three.js
 - Vite
 
 ## Deployment
 
-Built files are ready for static hosting on platform Netlify.
+Configured for Netlify CI/CD via `netlify.toml` (build command `npm run build`,
+publish directory `dist`): import the repo in Netlify once and every merge to
+the production branch triggers a rebuild and deploy. The same `dist` output can
+be hosted on any static host.
